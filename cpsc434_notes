@@ -1,0 +1,3 @@
+To reset db on postgres container: docker compose --file etc/docker/dev/docker-compose.yml down --remove-orphans
+
+rule activities can be specified on the CLI

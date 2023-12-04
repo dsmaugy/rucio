@@ -51,6 +51,10 @@ FILTER_TRANSFERTOOL = config_get('conveyor', 'filter_transfertool', False, None)
 TRANSFER_TYPE = config_get('conveyor', 'transfertype', False, 'single')
 
 
+# current: fetch (unordered) transfer requests from DB
+# TODO: Order transfer requests through pluggable ranking system
+# TODO: create baseline set of ranking plugins
+# TODO: return list of queues containing (ordered) transfers grouped by activity / transfer classification type 
 def _fetch_requests(
         partition_hash_var: Optional[str],
         bulk: int,
@@ -113,6 +117,7 @@ def _fetch_requests(
     return must_sleep, (topology, requests_with_sources)
 
 
+# TODO: for each queue, submit transfers in order
 def _handle_requests(
         batch,
         *,
