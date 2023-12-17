@@ -27,3 +27,18 @@ def _handle_requests():
 
 def _fetch_requests():
     pass
+
+
+"""
+TODO:
+
+- CLI binary
+- How to modify preparer/throttler and submitter so that we can lie in between them
+    - Go before throttler??
+- Figure out scheduling framework/logic
+    - Can we get VOs?
+    - 
+
+Milestone: Intercept requests in between different daemon stages
+     - Get requests from preparer/throttler, have it in memory, send it off to submitter
+"""
