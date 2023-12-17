@@ -1,3 +1,14 @@
 To reset db on postgres container: docker compose --file etc/docker/dev/docker-compose.yml down --remove-orphans
 
 rule activities can be specified on the CLI
+
+
+Throttler:
+- Throttler limits requests by groups
+	- Group = (source_rse, dest_rse, activity)
+- Throttler finds requests by following state:
+	- QUEUED, SUBMITTING, SUBMITTED, WAITING
+- Throttler marks request as "good to go" by changing state to "QUEUED"
+
+Submitter:
+- Submitter searches for QUEUED state
