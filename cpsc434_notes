@@ -1,3 +1,22 @@
 To reset db on postgres container: docker compose --file etc/docker/dev/docker-compose.yml down --remove-orphans
 
 rule activities can be specified on the CLI
+
+The test RSE commands are located in tools/docker_activate_rses.sh
+
+** MUST TURN ON PREPARER IN RUCIO.CFG SO NEW RULES WILL BE IN PREPARING STAGE ** 
+	- If preparer is not enabled, all new rules will automatically set to QUEUED state
+
+Preparer:
+- Searches for PREPARING requests
+- Marks request as WAITING if throttler set, QUEUED otherwise
+
+Throttler:
+- Throttler limits requests by groups
+	- Group = (source_rse, dest_rse, activity)
+- Throttler finds requests by following state:
+	- QUEUED, SUBMITTING, SUBMITTED, WAITING
+- Throttler marks request as "good to go" by changing state to "QUEUED"
+
+Submitter:
+- Submitter searches for QUEUED state
