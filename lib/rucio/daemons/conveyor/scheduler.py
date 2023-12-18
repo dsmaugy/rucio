@@ -6,7 +6,7 @@ The scheduler is a daemon that orders transfer requests before sending them to t
 import logging
 import threading
 from types import FrameType
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import rucio.db.sqla.util
 
@@ -14,15 +14,15 @@ from rucio.common import exception
 from rucio.common.logging import setup_logging
 from rucio.core.monitor import MetricManager
 from rucio.core.topology import Topology, ExpiringObjectCache
-from rucio.core.request import list_and_mark_transfer_requests_and_source_replicas
+from rucio.core.request import list_and_mark_transfer_requests_and_source_replicas, update_request
 from rucio.daemons.common import db_workqueue, ProducerConsumerDaemon
 from rucio.db.sqla.constants import RequestState, RequestType
-
 
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
     from rucio.daemons.common import HeartbeatHandler
+    from rucio.core.request import RequestWithSources
 
 GRACEFUL_STOP = threading.Event()
 METRICS = MetricManager(module=__name__) # TODO: do we want to keep track of metrics or nah?
@@ -53,8 +53,6 @@ def run(
 
     scheduler(once=once, sleep_time=sleep_time, bulk=bulk, cached_topology=cached_topology)
 
-# TODO: should create producer/consumer objects and add them to the ProducerConsumerDaemon
-# TODO: handle run once vs. event-based runs?
 # main entrypoint to scheduler daemon
 def scheduler(once: bool, 
               sleep_time: int, 
@@ -83,9 +81,30 @@ def scheduler(once: bool,
         graceful_stop=GRACEFUL_STOP,
     ).run()
 
-def _handle_requests(requests_to_schedule):
-    logging.debug("Scheduling Following Requests: " + str(requests_to_schedule))
+# Receives the request object from `_fetch_requests` and performs the scheduling logic
+def _handle_requests(elements: Tuple[Topology, Dict[str, 'RequestWithSources']]):
+    topology, requests_to_schedule = elements
+    logging.debug("Topology: %s", str(topology))
+    logging.debug("Scheduling Following %d requests", len(requests_to_schedule))
 
+    # DEBUG PRINT
+    for request_id, request in requests_to_schedule.items():
+        logging.debug("Request %s: %s", request_id, str(request))
+        logging.debug("\tActivity: %s | Internal Account: %s | External Account: %s | VO: %s | Priority: %d", 
+                      request.activity, request.account.internal, request.account.external, request.account.vo, request.priority)
+    
+    # trivial, mark ALL requests as QUEUED for the submitter without doing any ordering
+    # this just shows us that our daemon execution is correct
+    for request_id in requests_to_schedule.keys():
+        update_request(request_id=request_id, state=RequestState.QUEUED)
+
+    # TODO: we want to do our ordering logic here to determine which requests to schedule out of `requests_to_schedule`
+        # TODO: we need to figure out how this will integrate with the existing functionality from the throttler
+        #   - Is this daemon supposed to be a more modularizable, configurable version of the throttler? 
+        #       In that case, are we basically copying throttler functionality to this daemon?
+        #   - If not, how do we implement this as to not duplicate what the throttler is doing in an unecessary way? 
+
+# The database producer function, this retreives PREPARING requests from the database packaged in a `RequestWithSources` object
 def _fetch_requests(bulk: int,
                     cached_topology,
                     heartbeat_handler: "HeartbeatHandler",
@@ -101,8 +120,8 @@ def _fetch_requests(bulk: int,
         total_workers=total_workers,
         worker_number=worker_number,
         limit=bulk,
-        request_state=RequestState.PREPARING,
-        # request_type=[RequestType.TRANSFER],
+        request_state=RequestState.PREPARING, # TODO: if preparer is run with throttler, this will be WAITING
+        request_type=[RequestType.TRANSFER], 
         processed_at_delay=1, # TODO: this is for debugging so we keep getting the from subsequent daemon runs quickly
         session=session,
     )
