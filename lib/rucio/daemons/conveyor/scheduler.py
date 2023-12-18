@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import rucio.db.sqla.util
 
 from rucio.common import exception
+from rucio.common.config import config_get_bool
 from rucio.common.logging import setup_logging
 from rucio.core.monitor import MetricManager
 from rucio.core.topology import Topology, ExpiringObjectCache
@@ -84,19 +85,20 @@ def scheduler(once: bool,
 # Receives the request object from `_fetch_requests` and performs the scheduling logic
 def _handle_requests(elements: Tuple[Topology, Dict[str, 'RequestWithSources']]):
     topology, requests_to_schedule = elements
+    logging.debug("Scheduler Status is: %s", config_get_bool("conveyor", "use_scheduler", default=False))
     logging.debug("Topology: %s", str(topology))
-    logging.debug("Scheduling Following %d requests", len(requests_to_schedule))
+    logging.debug("Scheduling %d requests", len(requests_to_schedule))
 
     # DEBUG PRINT
     for request_id, request in requests_to_schedule.items():
         logging.debug("Request %s: %s", request_id, str(request))
         logging.debug("\tActivity: %s | Internal Account: %s | External Account: %s | VO: %s | Priority: %d", 
                       request.activity, request.account.internal, request.account.external, request.account.vo, request.priority)
-    
+
     # trivial, mark ALL requests as QUEUED for the submitter without doing any ordering
     # this just shows us that our daemon execution is correct
-    for request_id in requests_to_schedule.keys():
-        update_request(request_id=request_id, state=RequestState.QUEUED)
+    # for request_id in requests_to_schedule.keys():
+        # update_request(request_id=request_id, state=RequestState.QUEUED)
 
     # TODO: we want to do our ordering logic here to determine which requests to schedule out of `requests_to_schedule`
         # TODO: we need to figure out how this will integrate with the existing functionality from the throttler
@@ -120,7 +122,7 @@ def _fetch_requests(bulk: int,
         total_workers=total_workers,
         worker_number=worker_number,
         limit=bulk,
-        request_state=RequestState.PREPARING, # TODO: if preparer is run with throttler, this will be WAITING
+        request_state=RequestState.SCHEDULNG,
         request_type=[RequestType.TRANSFER], 
         processed_at_delay=1, # TODO: this is for debugging so we keep getting the from subsequent daemon runs quickly
         session=session,

@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common import constants
-from rucio.common.config import config_get, config_get_list
+from rucio.common.config import config_get, config_get_bool, config_get_list
 from rucio.common.constants import SUPPORTED_PROTOCOLS
 from rucio.common.exception import (InvalidRSEExpression,
                                     RequestNotFound, RSEProtocolNotSupported,
@@ -1394,7 +1394,8 @@ def prepare_transfers(
             continue
 
         update_dict: dict[Any, Any] = {
-            models.Request.state.name: _throttler_request_state(
+            models.Request.state.name: RequestState.SCHEDULNG if config_get_bool("conveyor", "use_scheduler", default=False) 
+            else _throttler_request_state(
                 activity=rws.activity,
                 source_rse=selected_source.rse,
                 dest_rse=rws.dest_rse,
