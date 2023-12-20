@@ -4,6 +4,7 @@ The scheduler is a daemon that orders transfer requests before sending them to t
 """
 
 from collections import defaultdict, deque
+from email.policy import default
 import logging
 import threading
 from types import FrameType
@@ -101,10 +102,17 @@ def _handle_requests(elements: Tuple[Dict[str, 'SchedulerDataset'], Dict[str, in
 
     # SINCRONIA IMPLEMENTATION
         
-    # 1. Find most bottlenecked RSE (Darwin)
-        
+    # 1. Find most bottlenecked RSE of all unordered datasets (Darwin)
+    unordered_rse_loads = defaultdict(int)
+    for dataset in unordered_datasets.values():
+        for rse_id, rse_load in dataset.num_bytes_per_rse.items():
+            unordered_rse_loads[rse_id] += rse_load
+    bottlenecked_rse_id = max(unordered_rse_loads.items(), key= lambda x: x[1])[0]
+
+    logging.debug("Bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, unordered_rse_loads[bottlenecked_rse_id])
     # 2. Iterate through unordered datasets, find most unfair dataset on bottlenecked RSE (according to Sincronia rules) 
-        
+    most_unfair_dataset = max(unordered_datasets.items(), key=lambda x: x[1].num_bytes_per_rse.get(bottlenecked_rse_id, 0) * x[1].weight)[0]
+    logging.debug("Most Unfair Dataset: %s with %s bytes on RSE %s", most_unfair_dataset, unordered_datasets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id], bottlenecked_rse_id)
     # 3. Re-adjust weights for unordered datasets
 
     # 4. Add most unfair dataset to ordered dataset list
@@ -162,16 +170,12 @@ def _fetch_requests(bulk: int,
         for sibling_file in parent_dataset_contents:
             if sibling_file['type'] == DIDType.FILE:
                 rse_load_map[request.dest_rse.id] += sibling_file['bytes']
-                parent_dataset.num_bytes += sibling_file['bytes']
+                parent_dataset.num_bytes_per_rse[request.dest_rse.id] += sibling_file['bytes']
                 if request.requested_source:
                     rse_load_map[request.requested_source.rse.id] += sibling_file['bytes']
-                    parent_dataset.num_bytes += sibling_file['bytes']
+                    parent_dataset.num_bytes_per_rse[request.requested_source.rse.id] += sibling_file['bytes']
     
-    # assume that bottleneck is only from total number of bytes that need to be transferred
-    # this probably isn't the best strategy
-    bottlenecked_rse_id = max(rse_load_map.items(), key= lambda x: rse_load_map[x[0]])[0]
     logging.debug("RSE Load: %s", rse_load_map)
-    logging.debug("Most bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, rse_load_map[bottlenecked_rse_id])
 
     return False, (unordered_datasets, rse_load_map)
 
@@ -182,7 +186,7 @@ class SchedulerDataset:
         self._id = (scope, name)
         self.scope = scope
         self.name = name
-        self.num_bytes = 0  # number of bytes this dataset takes up in this scheduling cycle
+        self.num_bytes_per_rse = defaultdict(int)  # number of bytes this dataset takes up in this scheduling cycle
         self.weight = 0
 
     def __eq__(self, __value: 'SchedulerDataset') -> bool:
