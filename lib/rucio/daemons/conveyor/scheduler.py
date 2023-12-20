@@ -55,6 +55,9 @@ def run(
     if rucio.db.sqla.util.is_old_db():
         raise exception.DatabaseException('Database was not updated, daemon won\'t start')
     
+    if config_get_bool("conveyor", "use_preparer", default=False):
+        raise exception.ConfigurationError("Preparer not enabled! Scheduler daemon only works when preparer is running.")
+    
     cached_topology = ExpiringObjectCache(ttl=300, new_obj_fnc=lambda: Topology()) # TODO: we ignore "ignore_availablity" here
 
     scheduler(once=once, sleep_time=sleep_time, bulk=bulk, cached_topology=cached_topology)
@@ -102,22 +105,37 @@ def _handle_requests(elements: Tuple[Dict[str, 'SchedulerDataset'], Dict[str, in
 
     # SINCRONIA IMPLEMENTATION
         
-    # 1. Find most bottlenecked RSE of all unordered datasets (Darwin)
-    unordered_rse_loads = defaultdict(int)
-    for dataset in unordered_datasets.values():
-        for rse_id, rse_load in dataset.num_bytes_per_rse.items():
-            unordered_rse_loads[rse_id] += rse_load
-    bottlenecked_rse_id = max(unordered_rse_loads.items(), key= lambda x: x[1])[0]
+    ordered_datasets = deque()
 
-    logging.debug("Bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, unordered_rse_loads[bottlenecked_rse_id])
-    # 2. Iterate through unordered datasets, find most unfair dataset on bottlenecked RSE (according to Sincronia rules) 
-    most_unfair_dataset = max(unordered_datasets.items(), key=lambda x: x[1].num_bytes_per_rse.get(bottlenecked_rse_id, 0) * x[1].weight)[0]
-    logging.debug("Most Unfair Dataset: %s with %s bytes on RSE %s", most_unfair_dataset, unordered_datasets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id], bottlenecked_rse_id)
-    # 3. Re-adjust weights for unordered datasets
+    while len(unordered_datasets) != 0:
+        # 1. Find most bottlenecked RSE out of unordered datasets
+        unordered_rse_loads = defaultdict(int)
+        for dataset in unordered_datasets.values():
+            for rse_id, rse_load in dataset.num_bytes_per_rse.items():
+                unordered_rse_loads[rse_id] += rse_load
+        bottlenecked_rse_id = max(unordered_rse_loads.items(), key= lambda x: x[1])[0]
 
-    # 4. Add most unfair dataset to ordered dataset list
+        logging.debug("Bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, unordered_rse_loads[bottlenecked_rse_id])
+
+         # 2. Find most unfair dataset on bottlenecked RSE and calculate num_bottlenecked_bytes for all unordered_datasets
+        most_unfair_dataset = max(unordered_datasets.items(), key=lambda x: x[1].num_bytes_per_rse.get(bottlenecked_rse_id, 0) * x[1].weight)[0]
+        logging.debug("Most Unfair Dataset: %s with %s bytes on RSE %s", most_unfair_dataset, unordered_datasets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id], bottlenecked_rse_id)
+
+        # 3. Re-adjust weights for unordered datasets
+        for dataset_name, dataset in unordered_datasets.items():
+            if dataset_name == most_unfair_dataset:
+                pass
+            dataset.weight = dataset.weight - (unordered_datasets[most_unfair_dataset].weight * (dataset.num_bytes_per_rse[bottlenecked_rse_id] / unordered_datasets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id]))
         
-    # 5. REPEAT until unordered dataset list empty
+        # 4. Add most unfair dataset to ordered dataset list
+        ordered_datasets.appendleft(unordered_datasets[most_unfair_dataset])
+        del unordered_datasets[most_unfair_dataset]
+        
+    logging.debug("Dataset Ordering: %s", ordered_datasets)
+    # Prepare the ordered datasets to send to the throttler
+    # TODO
+    
+
 
     # 6. Send files to throttler in order of ordered datasets
 
@@ -189,24 +207,11 @@ class SchedulerDataset:
         self.scope = scope
         self.name = name
         self.num_bytes_per_rse = defaultdict(int)  # number of bytes this dataset takes up in this scheduling cycle
-        self.weight = 0
+        self.num_bottlenecked_bytes = 0 # number of bytes this dataset takes up on the currently most bottlenecked port
+        self.weight = 1.0
 
     def __eq__(self, __value: 'SchedulerDataset') -> bool:
         return __value._id == self._id
     
     def __hash__(self) -> int:
         return hash(self._id)
-
-"""
-TODO:
-
-- CLI binary
-- How to modify preparer/throttler and submitter so that we can lie in between them
-    - Go before throttler??
-- Figure out scheduling framework/logic
-    - Can we get VOs?
-    - 
-
-Milestone: Intercept requests in between different daemon stages
-     - Get requests from preparer/throttler, have it in memory, send it off to submitter
-"""
