@@ -4,10 +4,12 @@ The scheduler is a daemon that orders transfer requests before sending them to t
 """
 
 from collections import defaultdict, deque
+from email.policy import default
 import logging
 import threading
 from types import FrameType
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, List, Optional, Tuple
+
 
 
 import rucio.db.sqla.util
@@ -16,12 +18,14 @@ from rucio.common import exception
 from rucio.common.config import config_get_bool
 from rucio.common.logging import setup_logging
 from rucio.common.types import InternalScope
-from rucio.core.did import get_metadata, list_content
+from rucio.core.did import get_metadata, list_content, list_parent_dids
 from rucio.core.monitor import MetricManager
 from rucio.core.topology import Topology, ExpiringObjectCache
 from rucio.core.request import list_and_mark_transfer_requests_and_source_replicas, update_request
+from rucio.core.transfer import applicable_rse_transfer_limits
 from rucio.daemons.common import db_workqueue, ProducerConsumerDaemon
 from rucio.db.sqla.constants import RequestState, RequestType, DIDType
+from rucio.db.sqla import models
 
 
 if TYPE_CHECKING:
@@ -33,6 +37,7 @@ GRACEFUL_STOP = threading.Event()
 METRICS = MetricManager(module=__name__) # TODO: do we want to keep track of metrics or nah?
 DAEMON_NAME = 'conveyor-scheduler'
 
+scheduling_starting_count = 0 # starting number for scheduling priority for this scheduling cycle
 
 def stop(signum: Optional[int] = None, frame: Optional[FrameType] = None) -> None:
     """
@@ -53,6 +58,9 @@ def run(
 
     if rucio.db.sqla.util.is_old_db():
         raise exception.DatabaseException('Database was not updated, daemon won\'t start')
+    
+    if not config_get_bool("conveyor", "use_preparer", default=False):
+        raise exception.ConfigurationError("Preparer not enabled! Scheduler daemon only works when preparer is running.")
     
     cached_topology = ExpiringObjectCache(ttl=300, new_obj_fnc=lambda: Topology()) # TODO: we ignore "ignore_availablity" here
 
@@ -87,45 +95,62 @@ def scheduler(once: bool,
     ).run()
 
 # Receives the request object from `_fetch_requests` and performs the scheduling logic
-def _handle_requests(elements: Tuple[Dict[str, 'SchedulerDataset'], Dict[str, int]]):
-    unordered_datasets, rse_load_map = elements
+def _handle_requests(elements: Tuple[Dict[str, 'RequestWithSources'], Dict[str, 'SchedulerDataset']]):
+    requests_with_sources, dataset_map = elements
     logging.debug("Scheduler Status is: %s", config_get_bool("conveyor", "use_scheduler", default=False))
-    logging.debug("UNORDERED DATASETS: %s", unordered_datasets)
-    logging.debug("RSE LOAD MAP: %s", rse_load_map)
-    # DEBUG PRINT
-    # for request_id, request in requests_to_schedule.items():
-    #     logging.debug("Request %s: %s", request_id, str(request))
-    #     logging.debug("\tActivity: %s | Internal Account: %s | External Account: %s | VO: %s | Priority: %d", 
-    #                   request.activity, request.account.internal, request.account.external, request.account.vo, request.priority)
-    #     logging.debug("\tScope: %s | Dest RSE %s | Source RSE %s", request.scope, request.dest_rse, request.requested_source)
-
+    logging.debug("UNORDERED DATASETS: %s", dataset_map)
     # SINCRONIA IMPLEMENTATION
-    ordered_datasets = deque()
-    while len(unordered_datasets) != 0:
-        # 1. Find most bottlenecked RSE 
-        bottleneck = 'XD01'
+        
+    ordered_datasets: Deque[str] = deque()
+    unordered_datsets = dataset_map.copy()
+
+    while len(unordered_datsets) != 0:
+        # 1. Find most bottlenecked RSE out of unordered datasets
+        unordered_rse_loads = defaultdict(int)
+        for dataset in unordered_datsets.values():
+            for rse_id, rse_load in dataset.num_bytes_per_rse.items():
+                unordered_rse_loads[rse_id] += rse_load
+        bottlenecked_rse_id = max(unordered_rse_loads.items(), key= lambda x: x[1])[0]
+
+        logging.debug("Bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, unordered_rse_loads[bottlenecked_rse_id])
 
          # 2. Find most unfair dataset on bottlenecked RSE and calculate num_bottlenecked_bytes for all unordered_datasets
-        most_unfair_dataset = 'something'
+        most_unfair_dataset = max(unordered_datsets.items(), key=lambda x: x[1].num_bytes_per_rse.get(bottlenecked_rse_id, 0) * x[1].weight)[0]
+        logging.debug("Most Unfair Dataset: %s with %s bytes on RSE %s", most_unfair_dataset, unordered_datsets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id], bottlenecked_rse_id)
 
         # 3. Re-adjust weights for unordered datasets
-        for dataset_name, dataset in unordered_datasets.items():
+        for dataset_name, dataset in unordered_datsets.items():
             if dataset_name == most_unfair_dataset:
                 pass
-            dataset.weight = dataset.weight - (unordered_datasets[most_unfair_dataset].weight * (dataset.num_bottlenecked_bytes / unordered_datasets[most_unfair_dataset].num_bottlenecked_bytes))
+            dataset.weight = dataset.weight - (unordered_datsets[most_unfair_dataset].weight * (dataset.num_bytes_per_rse[bottlenecked_rse_id] / unordered_datsets[most_unfair_dataset].num_bytes_per_rse[bottlenecked_rse_id]))
         
         # 4. Add most unfair dataset to ordered dataset list
-        ordered_datasets.appendleft(unordered_datasets[most_unfair_dataset])
-        del unordered_datasets[most_unfair_dataset]
+        ordered_datasets.appendleft(most_unfair_dataset)
+        del unordered_datsets[most_unfair_dataset]
+    logging.debug("Dataset Ordering: %s", ordered_datasets)
+
+    # keep track of scheduling order
+    scheduling_offset: Dict[str, int] = {}
+    if len(ordered_datasets) > 0:
+        scheduling_offset[ordered_datasets[0]] = scheduling_starting_count
+
+    # the offsets don't line up exactly due to the multiple dataset problem
+    # but this doesn't matter as only the relative values of the ordering is relevant
+    for i in range(1, len(ordered_datasets)):
+        scheduling_offset[ordered_datasets[i]] = scheduling_offset[ordered_datasets[i-1]] + dataset_map[ordered_datasets[i-1]].num_files
+    
+    for transfer_request in requests_with_sources.values():
+        dataset_identifier = str(transfer_request.parent_dataset_scope) + ":" + str(transfer_request.parent_dataset_name)
         
-    # Prepare the ordered datasets to send to the throttler
-    # TODO
+        update_items: dict[Any, Any] = {
+            models.Request.scheduling_order.name: scheduling_offset[dataset_identifier],
+            models.Request.state.name: RequestState.WAITING
+        }
+        logging.debug("Sending transfer %s to throttler with scheduling order %d", str(transfer_request), scheduling_offset[dataset_identifier])
+        # 6. Send files to throttler in order of ordered datasets
+        update_request(request_id=transfer_request.request_id, **update_items)
+        scheduling_offset[dataset_identifier] += 1
 
-
-    # trivial, mark ALL requests as QUEUED for the submitter without doing any ordering
-    # this just shows us that our daemon execution is correct
-    # for request_id in requests_to_schedule.keys():
-        # update_request(request_id=request_id, state=RequestState.QUEUED)
 
 
 # The database producer function, this retreives PREPARING requests from the database packaged in a `RequestWithSources` object
@@ -146,7 +171,6 @@ def _fetch_requests(bulk: int,
         limit=bulk,
         request_state=RequestState.SCHEDULNG,
         request_type=[RequestType.TRANSFER], 
-        processed_at_delay=1, # TODO: this is for debugging so we keep getting the from subsequent daemon runs quickly
         session=session,
     )
     
@@ -154,11 +178,14 @@ def _fetch_requests(bulk: int,
     unordered_datasets: Dict[str, SchedulerDataset] = {}
 
     for request in requests_with_sources.values():
-        # TODO: testing purposes, delete these later
-        # must do this because haven't implemented filling parent_dataset_* yet 
-        # TODO: find first parent dataset
-        request.parent_dataset_scope = request.scope # first dataset scope found for this file
-        request.parent_dataset_name = "dataset1"     # first dataset name found for this file
+        # assume that the first parent DID is the dataset we want to optimize for for this file
+        # this is for proof-of-concept purposes
+        # the optimal solution would be for clients to choose which dataset is the target dataset when submitting new transfer requests
+        parent_did = next(list_parent_dids(request.scope, request.name))
+
+        # logging.debug("parent did %s", parent_did)
+        request.parent_dataset_scope = parent_did["scope"] # first dataset scope found for this file
+        request.parent_dataset_name = parent_did["name"]     # first dataset name found for this file
         dataset_identifier = str(request.parent_dataset_scope) + ":" + request.parent_dataset_name
 
         unordered_datasets[dataset_identifier] = unordered_datasets.get(
@@ -171,20 +198,17 @@ def _fetch_requests(bulk: int,
         parent_dataset_contents = list_content(scope=request.parent_dataset_scope, name=request.parent_dataset_name, session=session)
         # add up all the bytes being processed per RSE (src + dest)
         for sibling_file in parent_dataset_contents:
+            parent_dataset.num_files += 1
             if sibling_file['type'] == DIDType.FILE:
                 rse_load_map[request.dest_rse.id] += sibling_file['bytes']
-                parent_dataset.num_bytes += sibling_file['bytes']
+                parent_dataset.num_bytes_per_rse[request.dest_rse.id] += sibling_file['bytes']
                 if request.requested_source:
                     rse_load_map[request.requested_source.rse.id] += sibling_file['bytes']
-                    parent_dataset.num_bytes += sibling_file['bytes']
+                    parent_dataset.num_bytes_per_rse[request.requested_source.rse.id] += sibling_file['bytes']
     
-    # assume that bottleneck is only from total number of bytes that need to be transferred
-    # this probably isn't the best strategy
-    bottlenecked_rse_id = max(rse_load_map.items(), key= lambda x: rse_load_map[x[0]])[0]
     logging.debug("RSE Load: %s", rse_load_map)
-    logging.debug("Most bottlenecked RSE: %s with %s bytes", bottlenecked_rse_id, rse_load_map[bottlenecked_rse_id])
 
-    return False, (unordered_datasets, rse_load_map)
+    return False, (requests_with_sources, unordered_datasets)
 
 
 class SchedulerDataset:
@@ -193,9 +217,12 @@ class SchedulerDataset:
         self._id = (scope, name)
         self.scope = scope
         self.name = name
-        self.num_bytes = 0  # number of bytes this dataset takes up in this scheduling cycle
-        self.num_bottlenecked_bytes = 0 # number of bytes this dataset takes up on the currently most bottlenecked port
+        self.num_bytes_per_rse = defaultdict(int)  # number of bytes this dataset takes up in this scheduling cycle
         self.weight = 1.0
+        self.num_files = 0
+
+    def dataset_equals(self, scope: InternalScope, name: str) -> bool:
+        return self.scope == scope and self.name == name
 
     def __eq__(self, __value: 'SchedulerDataset') -> bool:
         return __value._id == self._id

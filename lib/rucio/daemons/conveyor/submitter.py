@@ -20,7 +20,7 @@ import logging
 import threading
 from collections.abc import Mapping
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import rucio.db.sqla.util
 from rucio.common import exception
@@ -41,6 +41,7 @@ from rucio.transfertool.globus import GlobusTransferTool
 
 if TYPE_CHECKING:
     from rucio.daemons.common import HeartbeatHandler
+    from rucio.core.request import RequestWithSources
 
 METRICS = MetricManager(module=__name__)
 GRACEFUL_STOP = threading.Event()
@@ -51,10 +52,6 @@ FILTER_TRANSFERTOOL = config_get('conveyor', 'filter_transfertool', False, None)
 TRANSFER_TYPE = config_get('conveyor', 'transfertype', False, 'single')
 
 
-# current: fetch (unordered) transfer requests from DB
-# TODO: Order transfer requests through pluggable ranking system
-# TODO: create baseline set of ranking plugins
-# TODO: return list of queues containing (ordered) transfers grouped by activity / transfer classification type 
 def _fetch_requests(
         partition_hash_var: Optional[str],
         bulk: int,
@@ -83,9 +80,9 @@ def _fetch_requests(
         # if multihop is configured, we want all possible source rses. To allow multi-hopping between transfertools
         if not topology.multihop_enabled:
             required_source_rse_attrs = TRANSFERTOOL_CLASSES_BY_NAME[filter_transfertool].required_rse_attrs
-
+    
     # retrieve (from the database) the transfer requests with their possible source replicas
-    requests_with_sources = list_and_mark_transfer_requests_and_source_replicas(
+    requests_with_sources: Dict[str, 'RequestWithSources'] = list_and_mark_transfer_requests_and_source_replicas(
         rse_collection=topology,
         processed_by=heartbeat_handler.short_executable if set_last_processed_by else None,
         total_workers=total_workers,
@@ -100,11 +97,13 @@ def _fetch_requests(
         ignore_availability=ignore_availability,
         transfertool=filter_transfertool,
         required_source_rse_attrs=required_source_rse_attrs,
+        order_by_scheduler=True if config_get_bool("conveyor", "use_scheduler", default=False) else False,
     )
 
     stopwatch.stop()
     total_transfers = len(requests_with_sources)
-
+    for t_request in requests_with_sources.values():
+        logger(logging.DEBUG, "transfer request name: %s", t_request.name)
     metrics.timer('get_transfers.time_per_transfer').observe(stopwatch.elapsed / (total_transfers or 1))
     metrics.counter('get_transfers.total_transfers').inc(total_transfers)
     logger(logging.INFO, 'Got %s transfers for %s in %s seconds', total_transfers, activity, stopwatch.elapsed)
@@ -117,7 +116,6 @@ def _fetch_requests(
     return must_sleep, (topology, requests_with_sources)
 
 
-# TODO: for each queue, submit transfers in order
 def _handle_requests(
         batch,
         *,
@@ -131,7 +129,7 @@ def _handle_requests(
         logger=logging.log,
 ):
     topology, requests_with_sources = batch
-
+    
     protocol_factory = ProtocolFactory()
     default_tombstone_delay = config_get_int('transfers', 'multihop_tombstone_delay', default=DEFAULT_MULTIHOP_TOMBSTONE_DELAY, expiration_time=600)
     admin_accounts = list_transfer_admin_accounts()

@@ -375,6 +375,7 @@ def list_and_mark_transfer_requests_and_source_replicas(
         required_source_rse_attrs: Optional[list[str]] = None,
         ignore_availability: bool = False,
         transfertool: Optional[str] = None,
+        order_by_scheduler: Optional[bool] = False,
         *,
         session: "Session",
 ) -> dict[str, RequestWithSources]:
@@ -394,6 +395,7 @@ def list_and_mark_transfer_requests_and_source_replicas(
     :param request_state: Filter on the given request state
     :param transfertool: The transfer tool as specified in rucio.cfg.
     :param required_source_rse_attrs: Only select source RSEs having these attributes set
+    :param order_by_scheduler: Used in submitter to select transfers in order declared by the scheduler
     :param ignore_availability: Ignore blocklisted RSEs
     :param session: Database session to use.
     :returns: List of RequestWithSources objects.
@@ -427,7 +429,8 @@ def list_and_mark_transfer_requests_and_source_replicas(
         models.Request.created_at,
         models.Request.requested_at,
         models.Request.priority,
-        models.Request.transfertool
+        models.Request.transfertool,
+        models.Request.scheduling_order
     ).with_hint(
         models.Request, "INDEX(REQUESTS REQUESTS_TYP_STA_UPD_IDX)", 'oracle'
     ).where(
@@ -444,7 +447,7 @@ def list_and_mark_transfer_requests_and_source_replicas(
     ).where(
         models.TransferHop.next_hop_request_id == null()
     ).order_by(
-        models.Request.created_at
+        asc(models.Request.scheduling_order) if order_by_scheduler else models.Request.created_at
     )
 
     if processed_by:
@@ -512,7 +515,7 @@ def list_and_mark_transfer_requests_and_source_replicas(
         models.Source.url.label("source_url"),
         models.Distance.distance
     ).order_by(
-        sub_requests.c.created_at
+        asc(sub_requests.c.scheduling_order) if order_by_scheduler else sub_requests.c.created_at
     ).outerjoin(
         models.RSEFileAssociation,
         and_(sub_requests.c.scope == models.RSEFileAssociation.scope,
@@ -820,6 +823,7 @@ def update_request(
         attributes: Optional[dict[str, str]] = None,
         priority: Optional[int] = None,
         transfertool: Optional[str] = None,
+        scheduling_order: Optional[int] = None,
         *,
         raise_on_missing: bool = False,
         session: "Session",
@@ -850,6 +854,8 @@ def update_request(
             update_items[models.Request.priority] = priority
         if transfertool is not None:
             update_items[models.Request.transfertool] = transfertool
+        if scheduling_order is not None:
+            update_items[models.Request.scheduling_order] = scheduling_order
 
         stmt = update(
             models.Request
@@ -2153,12 +2159,15 @@ def release_waiting_requests_fifo(
     dialect = session.bind.dialect.name
     rowcount = 0
 
+    # if scheduler enabled, we should follow scheduler ordering
+    release_order = asc(models.Request.scheduling_order) if config_get_bool("conveyor", "use_scheduler", default=False) else asc(models.Request.requested_at)
+
     subquery = select(
         models.Request.id
     ).where(
         models.Request.state == RequestState.WAITING
     ).order_by(
-        asc(models.Request.requested_at)
+        release_order
     ).limit(
         count
     )
