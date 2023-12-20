@@ -93,6 +93,8 @@ class RequestWithSources:
             priority: int,
             transfertool: str,
             requested_at: Optional[datetime.datetime] = None,
+            parent_dataset_scope: Optional[InternalScope] = None,
+            parent_dataset_name: Optional[str] = None,
     ):
 
         self.request_id = id_
@@ -116,6 +118,9 @@ class RequestWithSources:
 
         self.sources: list[RequestSource] = []
         self.requested_source: Optional[RequestSource] = None
+
+        self.parent_dataset_scope = parent_dataset_scope
+        self.parent_dataset_name = parent_dataset_name
 
     def __str__(self):
         return "{}({}:{})".format(self.request_id, self.scope, self.name)
