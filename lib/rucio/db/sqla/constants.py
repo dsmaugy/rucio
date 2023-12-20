@@ -124,6 +124,7 @@ class RequestErrMsg(Enum):
 
 class RequestState(Enum):
     QUEUED = 'Q'
+    SCHEDULNG = 'C'
     SUBMITTING = 'G'
     SUBMITTED = 'S'
     FAILED = 'F'
