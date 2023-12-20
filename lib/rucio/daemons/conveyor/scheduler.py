@@ -100,16 +100,27 @@ def _handle_requests(elements: Tuple[Dict[str, 'SchedulerDataset'], Dict[str, in
     #     logging.debug("\tScope: %s | Dest RSE %s | Source RSE %s", request.scope, request.dest_rse, request.requested_source)
 
     # SINCRONIA IMPLEMENTATION
-        
-    # 1. Find most bottlenecked RSE (Darwin)
-        
-    # 2. Iterate through unordered datasets, find most unfair dataset on bottlenecked RSE (according to Sincronia rules) 
-        
-    # 3. Re-adjust weights for unordered datasets
+    ordered_datasets = deque()
+    while len(unordered_datasets) != 0:
+        # 1. Find most bottlenecked RSE 
+        bottleneck = 'XD01'
 
-    # 4. Add most unfair dataset to ordered dataset list
+         # 2. Find most unfair dataset on bottlenecked RSE and calculate num_bottlenecked_bytes for all unordered_datasets
+        most_unfair_dataset = 'something'
+
+        # 3. Re-adjust weights for unordered datasets
+        for dataset_name, dataset in unordered_datasets.items():
+            if dataset_name == most_unfair_dataset:
+                pass
+            dataset.weight = dataset.weight - (unordered_datasets[most_unfair_dataset].weight * (dataset.num_bottlenecked_bytes / unordered_datasets[most_unfair_dataset].num_bottlenecked_bytes))
         
-    # 5. REPEAT until unordered dataset list empty
+        # 4. Add most unfair dataset to ordered dataset list
+        ordered_datasets.appendleft(unordered_datasets[most_unfair_dataset])
+        del unordered_datasets[most_unfair_dataset]
+        
+    # Prepare the ordered datasets to send to the throttler
+    # TODO
+
 
     # trivial, mark ALL requests as QUEUED for the submitter without doing any ordering
     # this just shows us that our daemon execution is correct
@@ -183,24 +194,11 @@ class SchedulerDataset:
         self.scope = scope
         self.name = name
         self.num_bytes = 0  # number of bytes this dataset takes up in this scheduling cycle
-        self.weight = 0
+        self.num_bottlenecked_bytes = 0 # number of bytes this dataset takes up on the currently most bottlenecked port
+        self.weight = 1.0
 
     def __eq__(self, __value: 'SchedulerDataset') -> bool:
         return __value._id == self._id
     
     def __hash__(self) -> int:
         return hash(self._id)
-
-"""
-TODO:
-
-- CLI binary
-- How to modify preparer/throttler and submitter so that we can lie in between them
-    - Go before throttler??
-- Figure out scheduling framework/logic
-    - Can we get VOs?
-    - 
-
-Milestone: Intercept requests in between different daemon stages
-     - Get requests from preparer/throttler, have it in memory, send it off to submitter
-"""
