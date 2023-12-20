@@ -1394,8 +1394,7 @@ def prepare_transfers(
             continue
 
         update_dict: dict[Any, Any] = {
-            models.Request.state.name: RequestState.SCHEDULNG if config_get_bool("conveyor", "use_scheduler", default=False) 
-            else _throttler_request_state(
+            models.Request.state.name: _throttler_request_state(
                 activity=rws.activity,
                 source_rse=selected_source.rse,
                 dest_rse=rws.dest_rse,
@@ -1458,8 +1457,9 @@ def _throttler_request_state(activity, source_rse, dest_rse, *, session: "Sessio
     limit_found = False
     if any(applicable_rse_transfer_limits(activity=activity, source_rse=source_rse, dest_rse=dest_rse, session=session)):
         limit_found = True
+    throttled_state = RequestState.SCHEDULNG if config_get_bool("conveyor", "use_scheduler", default=False) else RequestState.WAITING
 
-    return RequestState.WAITING if limit_found else RequestState.QUEUED
+    return throttled_state if limit_found else RequestState.QUEUED
 
 
 @read_session

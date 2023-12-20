@@ -1287,6 +1287,7 @@ class Request(BASE, ModelBase):
     last_processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     priority: Mapped[Optional[int]] = mapped_column(Integer)
     transfertool: Mapped[Optional[str]] = mapped_column(String(64))
+    scheduling_order: Mapped[Optional[int]] = mapped_column(Integer)
     _table_args = (PrimaryKeyConstraint('id', name='REQUESTS_PK'),
                    ForeignKeyConstraint(['scope', 'name'], ['dids.scope', 'dids.name'], name='REQUESTS_DID_FK'),
                    ForeignKeyConstraint(['dest_rse_id'], ['rses.id'], name='REQUESTS_RSES_FK'),
