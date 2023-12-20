@@ -119,6 +119,8 @@ def _handle_requests(elements: Tuple[Dict[str, 'SchedulerDataset'], Dict[str, in
         
     # 5. REPEAT until unordered dataset list empty
 
+    # 6. Send files to throttler in order of ordered datasets
+
     # trivial, mark ALL requests as QUEUED for the submitter without doing any ordering
     # this just shows us that our daemon execution is correct
     # for request_id in requests_to_schedule.keys():
