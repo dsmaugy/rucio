@@ -147,7 +147,7 @@ def _handle_requests(elements: Tuple[Dict[str, 'RequestWithSources'], Dict[str, 
             models.Request.state.name: RequestState.WAITING
         }
         logging.debug("Sending transfer %s to throttler with scheduling order %d", str(transfer_request), scheduling_offset[dataset_identifier])
-        # 6. Send files to throttler in order of ordered datasets
+        # Send files to throttler in order of ordered datasets
         update_request(request_id=transfer_request.request_id, **update_items)
         scheduling_offset[dataset_identifier] += 1
 
