@@ -54,4 +54,52 @@ The scheduling algorithm is a four-step process. It begins after `sleep-time` se
 
 ## Testing
 
-TODO: put something very simple here, like what the test file is and how to run it, and what it tests
+To test, we first bootstrap all the relevant docker containers needed to run Rucio and transfer files:
+```
+docker compose --file etc/docker/dev/docker-compose.yml --profile storage up -d
+```
+
+Then we bootstrap the Rucio server with test RSEs, files, and the database schema inside the dev-rucio-1 container:
+```
+tools/run_tests.sh -ir
+```
+
+This creates a Rucio RSE rule that requires 4 transfers to happen in order to satisfy the rule.
+
+To add throttler limits, we have to do that in code. We open a Python process and type the following:
+```
+from rucio.core.request import set_transfer_limit, list_transfer_limits
+
+list(list_transfer_limits())
+set_transfer_limit("XRD1", max_transfers=20)
+set_transfer_limit("XRD2", max_transfers=20)
+set_transfer_limit("XRD3", max_transfers=20)
+set_transfer_limit("XRD4", max_transfers=20)
+```
+
+Then we run each conveyor daemon manually to see how scheduling process work:
+
+```
+rucio-conveyor-preparer --run-once
+...
+rucio-conveyor-scheduler --run-once
+...
+2023-12-20 21:08:00,474 root    1441    DEBUG   Scheduler Status is: True
+2023-12-20 21:08:00,474 root    1441    DEBUG   UNORDERED DATASETS: {'test:dataset1': <rucio.daemons.conveyor.scheduler.SchedulerDataset object at 0x7f50e03199d0>, 'test:dataset2': <rucio.daemons.conveyor.scheduler.SchedulerDataset object at 0x7f50e0319ac0>}
+2023-12-20 21:08:00,474 root    1441    DEBUG   Bottlenecked RSE: bf8cefdf50154bbf9e840ece281a6476 with 83886080 bytes
+2023-12-20 21:08:00,474 root    1441    DEBUG   Most Unfair Dataset: test:dataset1 with 41943040 bytes on RSE bf8cefdf50154bbf9e840ece281a6476
+2023-12-20 21:08:00,474 root    1441    DEBUG   Bottlenecked RSE: bf8cefdf50154bbf9e840ece281a6476 with 41943040 bytes
+2023-12-20 21:08:00,474 root    1441    DEBUG   Most Unfair Dataset: test:dataset2 with 41943040 bytes on RSE bf8cefdf50154bbf9e840ece281a6476
+2023-12-20 21:08:00,474 root    1441    DEBUG   Dataset Ordering: deque(['test:dataset2', 'test:dataset1'])
+2023-12-20 21:08:00,475 root    1441    DEBUG   Sending transfer adb1c0953ebf4a39b198cbd2c98704ef(test:file1) to throttler with scheduling order 4
+2023-12-20 21:08:00,476 root    1441    DEBUG   Sending transfer 68dd79394777435a98a47d24581fe501(test:file2) to throttler with scheduling order 5
+2023-12-20 21:08:00,477 root    1441    DEBUG   Sending transfer bd55437bbdb5422ba85db95ff163ade8(test:file3) to throttler with scheduling order 0
+2023-12-20 21:08:00,478 root    1441    DEBUG   Sending transfer 7cec9f39b41e4ba994dbd09200ba6a08(test:file4) to throttler with scheduling order 1
+...
+rucio-conveyor-throttler --run-once
+...
+rucio-conveyor-submitter --run-once
+...
+```
+
+From this test, we see that the order picked was file3, file4 (to satisfy dataset2) and then file1, file2 (to satisfy dataset1).
